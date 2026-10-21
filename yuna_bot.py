@@ -59,6 +59,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "message": "ゆなちゃんだいすき",
     "interval_seconds": 1.0,
     "max_messages": 0,
+    "card_message_id": "",
 }
 
 
@@ -152,11 +153,16 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     if max_messages < 0:
         raise BotError("max_messages は 0 以上で指定してください（0 = 無制限）。")
 
+    card_message_id = str(config.get("card_message_id", "")).strip()
+    if card_message_id and not card_message_id.isdigit():
+        raise BotError("card_message_id は数字だけで指定してください（空でも可）。")
+
     return {
         "channel_id": channel_id,
         "message": message,
         "interval_seconds": interval,
         "max_messages": max_messages,
+        "card_message_id": card_message_id,
     }
 
 
@@ -290,7 +296,9 @@ class YunaBot(discord.Client):
         self.once = once
         self.sent = 0
         self.started_at = time.monotonic()
+        self.image_url: str | None = None
         self._send_task: asyncio.Task[None] | None = None
+        self._refresh_task: asyncio.Task[None] | None = None
         self._health_runner: Any = None
 
     async def setup_hook(self) -> None:
@@ -347,11 +355,46 @@ class YunaBot(discord.Client):
             return None
         return channel
 
+    async def _refresh_card_url(self, channel: Any) -> None:
+        """カード画像メッセージから、埋め込み用の画像URLを取得する。"""
+        card_id = str(self.config.get("card_message_id", "")).strip()
+        if not card_id:
+            return
+
+        try:
+            card_message = await channel.fetch_message(int(card_id))
+        except discord.NotFound:
+            log("カードメッセージが見つかりません。テキストのみで送信します。")
+            return
+        except discord.Forbidden:
+            log("カードメッセージを取得する権限がありません。テキストのみで送信します。")
+            return
+        except discord.HTTPException as exc:
+            log(f"カード画像の取得に失敗しました（HTTP {exc.status}）。テキストのみで送信します。")
+            return
+
+        if not card_message.attachments:
+            log("カードメッセージに画像が添付されていません。テキストのみで送信します。")
+            return
+
+        self.image_url = card_message.attachments[0].url
+        log("カード画像のURLを読み込みました。")
+
+    async def _refresh_loop(self, channel: Any) -> None:
+        """署名付きURLの期限が切れる前に、定期的にURLを更新する。"""
+        while not self.is_closed():
+            await asyncio.sleep(6 * 60 * 60)
+            await self._refresh_card_url(channel)
+
     async def _send_loop(self) -> None:
         try:
             channel = await self._resolve_channel()
             if channel is None:
                 return
+
+            await self._refresh_card_url(channel)
+            if self._refresh_task is None or self._refresh_task.done():
+                self._refresh_task = asyncio.create_task(self._refresh_loop(channel))
 
             interval = float(self.config["interval_seconds"])
             limit = 1 if self.once else int(self.config["max_messages"])
@@ -367,8 +410,12 @@ class YunaBot(discord.Client):
                     await asyncio.sleep(next_at - now)
 
                 send_started = time.monotonic()
+                embed = None
+                if self.image_url:
+                    embed = discord.Embed(color=0xFF77A9)
+                    embed.set_image(url=self.image_url)
                 try:
-                    message = await channel.send(self.config["message"])
+                    message = await channel.send(self.config["message"], embed=embed)
                 except discord.RateLimited as exc:
                     wait = float(exc.retry_after) + 0.5
                     log(f"レート制限中です。{wait:.1f}秒待ちます…")

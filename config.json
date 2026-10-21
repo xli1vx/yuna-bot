@@ -1,6 +1,7 @@
 {
   "channel_id": "1562220022548537464",
   "message": "ゆなちゃんだいすき",
-  "interval_seconds": 1.0,
-  "max_messages": 0
+  "interval_seconds": 2.0,
+  "max_messages": 0,
+  "card_message_id": "1562479427709964389"
 }
